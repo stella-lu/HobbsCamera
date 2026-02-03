@@ -1,20 +1,23 @@
 import SwiftUI
+import SwiftData
 
 struct CameraView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var modelContext
+
     @StateObject private var camera = CameraService()
 
     @State private var isCapturing = false
-    @State private var lastSavedURL: URL? = nil
-    @State private var showSavedToast = false
+    @State private var showSavedOverlay = false
+
+    private let pipeline = PhotoSavePipeline()
 
     var body: some View {
         ZStack {
-            // Preview
             CameraPreview(session: camera.session)
                 .ignoresSafeArea()
 
-            // Overlay UI
+            // Top bar + bottom capture button
             VStack {
                 HStack {
                     Button {
@@ -23,78 +26,92 @@ struct CameraView: View {
                         Image(systemName: "chevron.left")
                             .font(.headline)
                             .padding(10)
-                            .background(.ultraThinMaterial)
-                            .clipShape(Circle())
+                            .background(.ultraThinMaterial, in: Circle())
                     }
 
                     Spacer()
-
-                    if let msg = camera.lastErrorMessage {
-                        Text(msg)
-                            .font(.footnote)
-                            .padding(10)
-                            .background(.ultraThinMaterial)
-                            .clipShape(RoundedRectangle(cornerRadius: 12))
-                    }
                 }
                 .padding()
 
                 Spacer()
 
-                // Bottom controls
-                VStack(spacing: 12) {
-                    if let url = lastSavedURL {
-                        Text("Saved privately: \(url.lastPathComponent)")
-                            .font(.footnote)
+                VStack(spacing: 10) {
+                    if let error = camera.lastErrorMessage {
+                        Text(error)
+                            .font(.callout)
                             .foregroundStyle(.white)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 8)
-                            .background(.black.opacity(0.4))
-                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                            .background(.black.opacity(0.6), in: Capsule())
                     }
 
                     Button {
-                        Task {
-                            await capture()
-                        }
+                        Task { await captureAndReturnToLibrary() }
                     } label: {
                         ZStack {
                             Circle()
                                 .fill(.white)
-                                .frame(width: 76, height: 76)
+                                .frame(width: 72, height: 72)
+
                             Circle()
-                                .strokeBorder(.white.opacity(0.6), lineWidth: 6)
-                                .frame(width: 88, height: 88)
+                                .stroke(.black.opacity(0.2), lineWidth: 2)
+                                .frame(width: 72, height: 72)
+
+                            if isCapturing {
+                                ProgressView()
+                                    .tint(.black)
+                            }
                         }
                     }
-                    .disabled(isCapturing || camera.lastErrorMessage != nil)
-                    .padding(.bottom, 30)
+                    .disabled(isCapturing)
+                    .padding(.bottom, 28)
+                    .accessibilityLabel("Capture photo")
                 }
             }
+
+            // Center "Saved!" overlay
+            if showSavedOverlay {
+                Text("Saved!")
+                    .font(.title2.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 12)
+                    .background(.black.opacity(0.65), in: Capsule())
+                    .transition(.opacity.combined(with: .scale))
+                    .zIndex(10)
+            }
         }
-        .navigationBarHidden(true)
-        .onAppear {
-            camera.start()
-        }
-        .onDisappear {
-            camera.stop()
-        }
+        .animation(.easeOut(duration: 0.18), value: showSavedOverlay)
+        .onAppear { camera.start() }
+        .onDisappear { camera.stop() }
     }
 
-    private func capture() async {
+    private func captureAndReturnToLibrary() async {
         guard !isCapturing else { return }
         isCapturing = true
         defer { isCapturing = false }
 
         do {
-            let url = try await camera.capturePhoto()
-            lastSavedURL = url
+            // Capture jpeg bytes + timestamp (Phase 1)
+            let capture = try await camera.capturePhoto()
+
+            // Persist full-res + thumbnail, and create SwiftData record (Phase 1/2)
+            let record = try await pipeline.run(capture: capture)
+
+            // Save record (Phase 2)
+            modelContext.insert(record)
+            try modelContext.save()
+
+            // Show "Saved!" briefly, then immediately return to library.
+            showSavedOverlay = true
+
+            // Small delay so the user actually sees "Saved!" before dismissing.
+            // This still feels immediate, but is visible.
+            try? await Task.sleep(nanoseconds: 350_000_000)
+
+            dismiss()
         } catch {
             camera.lastErrorMessage = "Capture failed: \(error.localizedDescription)"
         }
     }
-}
-
-#Preview {
-    NavigationStack { CameraView() }
 }

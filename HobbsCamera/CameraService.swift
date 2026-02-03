@@ -1,38 +1,35 @@
 import AVFoundation
 import Foundation
 
+/// Camera service:
+/// - Manages AVCaptureSession lifecycle
+/// - Handles permission states and user messaging
+/// - Captures photos asynchronously as JPEG bytes + capture timestamp
 @MainActor
-final class CameraService: NSObject, ObservableObject {
-    // Public
-    @Published var isRunning: Bool = false
-    @Published var lastErrorMessage: String? = nil
-
+final class CameraService: ObservableObject {
     let session = AVCaptureSession()
 
-    // Private
-    private let sessionQueue = DispatchQueue(label: "camera.session.queue")
-    private let photoOutput = AVCapturePhotoOutput()
+    @Published var lastErrorMessage: String?
 
+    private let sessionQueue = DispatchQueue(label: "com.hobbscamera.session.queue")
     private var isConfigured = false
+
+    private var photoOutput = AVCapturePhotoOutput()
 
     func start() {
         lastErrorMessage = nil
 
-        // Request permission first
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
-            configureAndStartIfNeeded()
+            configureIfNeededAndStart()
         case .notDetermined:
-            Task {
-                let granted = await AVCaptureDevice.requestAccess(for: .video)
-                if granted {
-                    configureAndStartIfNeeded()
-                } else {
-                    lastErrorMessage = "Camera permission is required to take photos."
-                }
-            }
-        default:
-            lastErrorMessage = "Camera permission is disabled. Enable it in Settings."
+            requestPermissionAndStart()
+        case .denied:
+            lastErrorMessage = "Camera access is denied. Enable it in Settings to take photos."
+        case .restricted:
+            lastErrorMessage = "Camera access is restricted on this device."
+        @unknown default:
+            lastErrorMessage = "Unknown camera permission state."
         }
     }
 
@@ -42,22 +39,52 @@ final class CameraService: NSObject, ObservableObject {
             if self.session.isRunning {
                 self.session.stopRunning()
             }
+        }
+    }
+
+    /// Captures a photo and returns JPEG bytes plus a capture timestamp.
+    /// The persistence pipeline (metadata stamping, saving files, thumbnails, records) happens elsewhere.
+    func capturePhoto() async throws -> PhotoCapture {
+        // Ensure session is running before capture.
+        guard session.isRunning else {
+            throw CameraError.sessionNotRunning
+        }
+
+        let settings = AVCapturePhotoSettings()
+        settings.isHighResolutionPhotoEnabled = true
+
+        // Capturing time for metadata stamping.
+        let createdAt = Date()
+
+        return try await withCheckedThrowingContinuation { continuation in
+            let delegate = PhotoCaptureDelegate(createdAt: createdAt) { result in
+                continuation.resume(with: result)
+            }
+
+            Task {
+                await CaptureDelegateStore.shared.insert(delegate)
+            }
+
+            photoOutput.capturePhoto(with: settings, delegate: delegate)
+        }
+    }
+
+    // MARK: - Permission + Configuration
+
+    private func requestPermissionAndStart() {
+        AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+            guard let self else { return }
             Task { @MainActor in
-                self.isRunning = false
+                if granted {
+                    self.configureIfNeededAndStart()
+                } else {
+                    self.lastErrorMessage = "Camera access is required to take photos."
+                }
             }
         }
     }
 
-    func capturePhoto() async throws -> URL {
-        // Capture returns JPEG data, and we save it privately in the app sandbox.
-        let data = try await captureJPEGData()
-        let url = try AppPhotoStore.saveJPEGToPrivateLibrary(data: data)
-        return url
-    }
-
-    // MARK: - Configuration
-
-    private func configureAndStartIfNeeded() {
+    private func configureIfNeededAndStart() {
         sessionQueue.async { [weak self] in
             guard let self else { return }
 
@@ -66,8 +93,8 @@ final class CameraService: NSObject, ObservableObject {
                     try self.configureSession()
                     self.isConfigured = true
                 } catch {
-                    Task { @MainActor in
-                        self.lastErrorMessage = "Failed to configure camera: \(error.localizedDescription)"
+                    DispatchQueue.main.async {
+                        self.lastErrorMessage = "Failed to configure camera."
                     }
                     return
                 }
@@ -76,10 +103,6 @@ final class CameraService: NSObject, ObservableObject {
             if !self.session.isRunning {
                 self.session.startRunning()
             }
-
-            Task { @MainActor in
-                self.isRunning = true
-            }
         }
     }
 
@@ -87,98 +110,89 @@ final class CameraService: NSObject, ObservableObject {
         session.beginConfiguration()
         session.sessionPreset = .photo
 
-        // Input
-        guard
-            let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
-        else {
-            throw NSError(domain: "CameraService", code: 1, userInfo: [NSLocalizedDescriptionKey: "No back camera available."])
+        defer { session.commitConfiguration() }
+
+        // Input: back wide angle camera.
+        guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) else {
+            throw CameraError.noCameraDevice
         }
 
         let input = try AVCaptureDeviceInput(device: device)
-        if session.canAddInput(input) {
-            session.addInput(input)
-        } else {
-            throw NSError(domain: "CameraService", code: 2, userInfo: [NSLocalizedDescriptionKey: "Unable to add camera input."])
-        }
+        guard session.canAddInput(input) else { throw CameraError.cannotAddInput }
+        session.addInput(input)
 
-        // Output
-        if session.canAddOutput(photoOutput) {
-            session.addOutput(photoOutput)
-            photoOutput.isHighResolutionCaptureEnabled = true
-        } else {
-            throw NSError(domain: "CameraService", code: 3, userInfo: [NSLocalizedDescriptionKey: "Unable to add photo output."])
-        }
+        // Output: photo output.
+        guard session.canAddOutput(photoOutput) else { throw CameraError.cannotAddOutput }
+        session.addOutput(photoOutput)
 
-        session.commitConfiguration()
-    }
-
-    // MARK: - Capture
-
-    private func captureJPEGData() async throws -> Data {
-        try await withCheckedThrowingContinuation { continuation in
-            let settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.jpeg])
-
-            let delegate = PhotoCaptureDelegate { result in
-                switch result {
-                case .success(let data):
-                    continuation.resume(returning: data)
-                case .failure(let error):
-                    continuation.resume(throwing: error)
-                }
-            }
-
-            // Keep delegate alive until callback completes
-            PhotoCaptureDelegateStore.shared.add(delegate)
-
-            self.photoOutput.capturePhoto(with: settings, delegate: delegate)
-        }
+        photoOutput.isHighResolutionCaptureEnabled = true
     }
 }
 
-// MARK: - Delegate plumbing
+// MARK: - Types
 
+struct PhotoCapture: Sendable {
+    let jpegData: Data
+    let createdAt: Date
+}
+
+enum CameraError: Error {
+    case sessionNotRunning
+    case noCameraDevice
+    case cannotAddInput
+    case cannotAddOutput
+}
+
+// MARK: - Delegate + Lifetime Management
+
+/// AVCapturePhotoCaptureDelegate that captures JPEG bytes and returns them via callback.
+/// Must be kept alive until the capture completes.
 private final class PhotoCaptureDelegate: NSObject, AVCapturePhotoCaptureDelegate {
-    typealias Completion = (Result<Data, Error>) -> Void
-    private let completion: Completion
+    private let createdAt: Date
+    private let completion: (Result<PhotoCapture, Error>) -> Void
+    private let id = UUID()
 
-    init(completion: @escaping Completion) {
+    init(createdAt: Date, completion: @escaping (Result<PhotoCapture, Error>) -> Void) {
+        self.createdAt = createdAt
         self.completion = completion
     }
 
     func photoOutput(_ output: AVCapturePhotoOutput,
                      didFinishProcessingPhoto photo: AVCapturePhoto,
                      error: Error?) {
-
-        defer { PhotoCaptureDelegateStore.shared.remove(self) }
-
-        if let error = error {
-            completion(.failure(error))
+        if let error {
+            finish(.failure(error))
             return
         }
+
         guard let data = photo.fileDataRepresentation() else {
-            completion(.failure(NSError(domain: "CameraService", code: 4, userInfo: [NSLocalizedDescriptionKey: "Failed to get photo data."])))
+            finish(.failure(NSError(domain: "CameraService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to create JPEG data."])))
             return
         }
-        completion(.success(data))
+
+        finish(.success(PhotoCapture(jpegData: data, createdAt: createdAt)))
     }
+
+    private func finish(_ result: Result<PhotoCapture, Error>) {
+        completion(result)
+        Task {
+            await CaptureDelegateStore.shared.remove(id: id)
+        }
+    }
+
+    var delegateID: UUID { id }
 }
 
-private final class PhotoCaptureDelegateStore {
-    static let shared = PhotoCaptureDelegateStore()
-    private init() {}
+/// Holds capture delegates strongly until capture completes.
+private actor CaptureDelegateStore {
+    static let shared = CaptureDelegateStore()
+    private var delegates: [UUID: PhotoCaptureDelegate] = [:]
 
-    private var delegates: Set<ObjectIdentifier> = []
-    private var objects: [ObjectIdentifier: AnyObject] = [:]
-
-    func add(_ obj: AnyObject) {
-        let id = ObjectIdentifier(obj)
-        delegates.insert(id)
-        objects[id] = obj
+    func insert(_ delegate: PhotoCaptureDelegate) {
+        delegates[delegate.delegateID] = delegate
     }
 
-    func remove(_ obj: AnyObject) {
-        let id = ObjectIdentifier(obj)
-        delegates.remove(id)
-        objects[id] = nil
+    func remove(id: UUID) {
+        delegates[id] = nil
     }
 }

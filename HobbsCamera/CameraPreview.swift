@@ -1,6 +1,5 @@
-import AVFoundation
 import SwiftUI
-import UIKit
+import AVFoundation
 
 struct CameraPreview: UIViewRepresentable {
     let session: AVCaptureSession
@@ -13,16 +12,18 @@ struct CameraPreview: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: PreviewView, context: Context) {
-        uiView.videoPreviewLayer.session = session
+        // Session is owned by CameraService; nothing to update here.
     }
 }
 
+/// A UIView backed by an AVCaptureVideoPreviewLayer for efficient camera preview rendering.
 final class PreviewView: UIView {
     override class var layerClass: AnyClass {
         AVCaptureVideoPreviewLayer.self
     }
 
     var videoPreviewLayer: AVCaptureVideoPreviewLayer {
+        // swiftlint:disable:next force_cast
         layer as! AVCaptureVideoPreviewLayer
     }
 }
