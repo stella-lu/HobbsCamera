@@ -88,6 +88,16 @@ enum AppPhotoStore {
         resolveURL(from: storedValue) { try thumbnailsDirectoryURL() }
     }
 
+    // MARK: - Public API (Delete)
+
+    /// Deletes a photo file and its thumbnail (if present) from private storage.
+    ///
+    /// This is best-effort: missing files are ignored.
+    static func deletePhotoAndThumbnail(photoStoredValue: String, thumbnailStoredValue: String) throws {
+        try deleteFileIfPresent(url: resolvePhotoURL(from: photoStoredValue))
+        try deleteFileIfPresent(url: resolveThumbnailURL(from: thumbnailStoredValue))
+    }
+
     // MARK: - Private (Resolution Core)
 
     /// Core resolver with backward compatibility.
@@ -228,6 +238,24 @@ enum AppPhotoStore {
         }
 
         return outData as Data
+    }
+
+    // MARK: - Private (Delete Helpers)
+
+    private static func deleteFileIfPresent(url: URL?) throws {
+        guard let url else { return }
+
+        let fm = FileManager.default
+        if fm.fileExists(atPath: url.path) {
+            do {
+                try fm.removeItem(at: url)
+            } catch {
+                // If the file disappears between the exists check and remove, treat as fine.
+                if fm.fileExists(atPath: url.path) {
+                    throw error
+                }
+            }
+        }
     }
 }
 
