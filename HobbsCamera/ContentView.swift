@@ -1,3 +1,4 @@
+// ContentView.swift
 import SwiftUI
 import SwiftData
 
@@ -80,7 +81,14 @@ struct LibraryView: View {
         // Hide the "Library" header title while selecting.
         .navigationTitle(isSelecting ? "" : "Library")
         .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
+            ToolbarItemGroup(placement: .topBarLeading) {
+                NavigationLink {
+                    SettingsView()
+                } label: {
+                    Image(systemName: "gearshape")
+                }
+                .disabled(isSelecting)
+
                 Button(isSelecting ? "Done" : "Select") {
                     withAnimation(.snappy) {
                         isSelecting.toggle()

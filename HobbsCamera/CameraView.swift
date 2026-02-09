@@ -1,3 +1,4 @@
+// CameraView.swift
 import SwiftUI
 import SwiftData
 
@@ -104,14 +105,20 @@ struct CameraView: View {
 
             // Show "Saved!" briefly, then immediately return to library.
             showSavedOverlay = true
-
-            // Small delay so the user actually sees "Saved!" before dismissing.
-            // This still feels immediate, but is visible.
             try? await Task.sleep(nanoseconds: 350_000_000)
 
             dismiss()
         } catch {
-            camera.lastErrorMessage = "Capture failed: \(error.localizedDescription)"
+            if let storeError = error as? StoreError {
+                switch storeError {
+                case .lowDiskSpace:
+                    camera.lastErrorMessage = storeError.localizedDescription
+                default:
+                    camera.lastErrorMessage = "Capture failed: \(storeError.localizedDescription)"
+                }
+            } else {
+                camera.lastErrorMessage = "Capture failed: \(error.localizedDescription)"
+            }
         }
     }
 }

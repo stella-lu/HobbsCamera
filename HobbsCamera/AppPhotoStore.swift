@@ -1,3 +1,4 @@
+// AppPhotoStore.swift
 import Foundation
 import ImageIO
 import UniformTypeIdentifiers
@@ -21,11 +22,25 @@ enum AppPhotoStore {
     private static let photosFolderName = "photos"
     private static let thumbnailsFolderName = "thumbnails"
 
+    /// Minimum free space required to attempt saving a new photo.
+    ///
+    /// This is intentionally conservative - iOS can become unstable when a device is very low on storage,
+    /// and writes may fail in ways that are hard to recover from gracefully.
+    private static let minimumFreeBytesBeforeSave: Int64 = 200 * 1024 * 1024 // 200 MB
+
+    /// Extra headroom beyond the estimated write size.
+    /// This accounts for filesystem overhead, temporary allocations, and thumbnail generation.
+    private static let saveHeadroomBytes: Int64 = 50 * 1024 * 1024 // 50 MB
+
     // MARK: - Public API (Save)
 
     /// Saves the photo to private storage, stamps timestamp metadata, and returns the saved photo URL.
     /// New code should store `url.lastPathComponent` (the filename) in SwiftData, not the absolute path.
     static func saveJPEGToPrivateLibrary(_ jpegData: Data, createdAt: Date) throws -> URL {
+        // Phase 4: guard against low-storage writes before touching disk.
+        // We include a small estimate for the thumbnail too.
+        try assertEnoughDiskSpaceForSave(estimatedWriteBytes: Int64(jpegData.count) + 1_200_000)
+
         let filename = "\(UUID().uuidString).jpg"
         let url = try photosDirectoryURL().appendingPathComponent(filename)
 
@@ -68,6 +83,43 @@ enum AppPhotoStore {
     /// Public, stable directory URL for thumbnails.
     static func thumbnailsDirectoryURL() throws -> URL {
         try ensureDirectory(appSubdirectory: thumbnailsFolderName)
+    }
+
+    // MARK: - Public API (Storage)
+
+    struct StorageUsage: Equatable {
+        let photosBytes: Int64
+        let thumbnailsBytes: Int64
+        let appTotalBytes: Int64
+        let deviceAvailableBytes: Int64?
+        let deviceTotalBytes: Int64?
+    }
+
+    /// Returns best-effort storage usage info for the app and the device.
+    static func currentStorageUsage() throws -> StorageUsage {
+        let photosDir = try photosDirectoryURL()
+        let thumbsDir = try thumbnailsDirectoryURL()
+
+        let photosBytes = directorySizeBytes(at: photosDir)
+        let thumbnailsBytes = directorySizeBytes(at: thumbsDir)
+        let appTotal = photosBytes + thumbnailsBytes
+
+        let device = deviceCapacityBytes()
+
+        return StorageUsage(
+            photosBytes: photosBytes,
+            thumbnailsBytes: thumbnailsBytes,
+            appTotalBytes: appTotal,
+            deviceAvailableBytes: device.available,
+            deviceTotalBytes: device.total
+        )
+    }
+
+    static func formatBytes(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useKB, .useMB, .useGB, .useTB]
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
     }
 
     // MARK: - Public API (Resolution Helpers)
@@ -257,6 +309,65 @@ enum AppPhotoStore {
             }
         }
     }
+
+    // MARK: - Private (Storage Checks)
+
+    /// Throws a user-friendly error if the device does not have enough free space for the save.
+    private static func assertEnoughDiskSpaceForSave(estimatedWriteBytes: Int64) throws {
+        let device = deviceCapacityBytes()
+        guard let available = device.available else {
+            // If we can't read capacity, proceed - writes can still fail, and the UI will surface the error.
+            return
+        }
+
+        let required = max(minimumFreeBytesBeforeSave, estimatedWriteBytes + saveHeadroomBytes)
+        if available < required {
+            throw StoreError.lowDiskSpace(availableBytes: available, requiredBytes: required)
+        }
+    }
+
+    private static func deviceCapacityBytes() -> (available: Int64?, total: Int64?) {
+        // Using the home directory is sufficient to query the current volume.
+        let url = URL(fileURLWithPath: NSHomeDirectory())
+        do {
+            let values = try url.resourceValues(forKeys: [
+                .volumeAvailableCapacityForImportantUsageKey,
+                .volumeAvailableCapacityKey,
+                .volumeTotalCapacityKey
+            ])
+
+            // NOTE: On some SDKs these properties are Int?, not Int64?, so we normalize to Int64 here.
+            let availableImportant: Int64? = values.volumeAvailableCapacityForImportantUsage.map { Int64($0) }
+            let availableRegular: Int64? = values.volumeAvailableCapacity.map { Int64($0) }
+            let available = availableImportant ?? availableRegular
+
+            let total: Int64? = values.volumeTotalCapacity.map { Int64($0) }
+
+            return (available: available, total: total)
+        } catch {
+            return (available: nil, total: nil)
+        }
+    }
+
+    private static func directorySizeBytes(at directoryURL: URL) -> Int64 {
+        let fm = FileManager.default
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey]
+
+        guard let enumerator = fm.enumerator(at: directoryURL, includingPropertiesForKeys: Array(keys)) else {
+            return 0
+        }
+
+        var total: Int64 = 0
+        for case let url as URL in enumerator {
+            guard let values = try? url.resourceValues(forKeys: keys) else { continue }
+            guard values.isRegularFile == true else { continue }
+            if let size = values.fileSize {
+                total += Int64(size)
+            }
+        }
+
+        return total
+    }
 }
 
 // MARK: - Errors
@@ -264,6 +375,23 @@ enum AppPhotoStore {
 enum StoreError: Error {
     case thumbnailGenerationFailed
     case metadataStampingFailed
+    case lowDiskSpace(availableBytes: Int64, requiredBytes: Int64)
+}
+
+extension StoreError: LocalizedError {
+    var errorDescription: String? {
+        switch self {
+        case .thumbnailGenerationFailed:
+            return "Could not generate thumbnail."
+        case .metadataStampingFailed:
+            return "Could not save photo metadata."
+        case let .lowDiskSpace(availableBytes, requiredBytes):
+            let available = AppPhotoStore.formatBytes(availableBytes)
+            let required = AppPhotoStore.formatBytes(requiredBytes)
+
+            return "Low storage. HobbsCamera needs about \(required) free to save a photo, but your device only has \(available) available. Free up space in Settings - General - iPhone Storage, delete some photos in HobbsCamera, then try again."
+        }
+    }
 }
 
 // MARK: - Utilities
