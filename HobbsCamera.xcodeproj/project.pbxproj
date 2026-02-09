@@ -29,9 +29,22 @@
 		37435A4C2F1D702B00EDC8D1 /* HobbsCameraUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = HobbsCameraUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		37262D242F39B18200AE6D14 /* Exceptions for "HobbsCamera" folder in "HobbsCamera" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 37435A342F1D702800EDC8D1 /* HobbsCamera */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		37435A372F1D702800EDC8D1 /* HobbsCamera */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				37262D242F39B18200AE6D14 /* Exceptions for "HobbsCamera" folder in "HobbsCamera" target */,
+			);
 			path = HobbsCamera;
 			sourceTree = "<group>";
 		};
@@ -398,8 +411,11 @@
 				DEVELOPMENT_TEAM = XSLKMAKYRL;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = HobbsCamera/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "";
 				INFOPLIST_KEY_LSApplicationCategoryType = "";
 				INFOPLIST_KEY_NSCameraUsageDescription = "This app uses the camera to take photos that stay only on your device.";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Allow HobbsCamera to save selected photos to Apple Photos.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -429,8 +445,11 @@
 				DEVELOPMENT_TEAM = XSLKMAKYRL;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = HobbsCamera/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "";
 				INFOPLIST_KEY_LSApplicationCategoryType = "";
 				INFOPLIST_KEY_NSCameraUsageDescription = "This app uses the camera to take photos that stay only on your device.";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Allow HobbsCamera to save selected photos to Apple Photos.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;

@@ -140,81 +140,83 @@ enum AppPhotoStore {
         resolveURL(from: storedValue) { try thumbnailsDirectoryURL() }
     }
 
-    // MARK: - Public API (Delete)
-
-    /// Deletes a photo file and its thumbnail (if present) from private storage.
-    ///
-    /// This is best-effort: missing files are ignored.
+    /// Deletes the on-disk photo and thumbnail for a record, if present.
     static func deletePhotoAndThumbnail(photoStoredValue: String, thumbnailStoredValue: String) throws {
-        try deleteFileIfPresent(url: resolvePhotoURL(from: photoStoredValue))
-        try deleteFileIfPresent(url: resolveThumbnailURL(from: thumbnailStoredValue))
+        let photoURL = resolvePhotoURL(from: photoStoredValue)
+        let thumbURL = resolveThumbnailURL(from: thumbnailStoredValue)
+
+        try deleteFileIfPresent(url: photoURL)
+        try deleteFileIfPresent(url: thumbURL)
     }
 
-    // MARK: - Private (Resolution Core)
+    // MARK: - Errors
 
-    /// Core resolver with backward compatibility.
-    ///
-    /// Resolution steps:
-    /// 1) If `storedValue` looks like an absolute path and the file exists, use it.
-    /// 2) Else treat `storedValue` as a filename in the expected directory.
-    /// 3) Else fall back to `lastPathComponent` in the expected directory.
-    private static func resolveURL(from storedValue: String, directory: () throws -> URL) -> URL? {
-        let fm = FileManager.default
+    enum StoreError: Error, LocalizedError, Equatable {
+        case directoriesUnavailable
+        case metadataStampingFailed
+        case thumbnailGenerationFailed
+        case lowDiskSpace(availableBytes: Int64, requiredBytes: Int64)
 
-        // 1) Absolute-path happy path (legacy records).
-        if storedValue.hasPrefix("/") {
-            let absolute = URL(fileURLWithPath: storedValue)
-            if fm.fileExists(atPath: absolute.path) {
-                return absolute
+        var errorDescription: String? {
+            switch self {
+            case .directoriesUnavailable:
+                return "Could not access the app’s photo storage."
+            case .metadataStampingFailed:
+                return "Could not stamp timestamp metadata into the photo."
+            case .thumbnailGenerationFailed:
+                return "Could not generate a thumbnail for this photo."
+            case .lowDiskSpace(let availableBytes, let requiredBytes):
+                let available = AppPhotoStore.formatBytes(availableBytes)
+                let required = AppPhotoStore.formatBytes(requiredBytes)
+                return "Low storage. HobbsCamera needs about \(required) free to save a photo, but your device only has \(available) available. Free up space in Settings - General - iPhone Storage, delete some photos in HobbsCamera, then try again."
             }
         }
+    }
 
-        // 2) Filename path (new records).
+    // MARK: - Private (URL Resolution)
+
+    private static func resolveURL(from storedValue: String, directoryProvider: () throws -> URL) -> URL? {
+        // If the stored value is already an absolute path, prefer it.
+        if storedValue.contains("/") {
+            let url = URL(fileURLWithPath: storedValue)
+            if FileManager.default.fileExists(atPath: url.path) {
+                return url
+            }
+            // Fall back to filename resolution below.
+        }
+
+        // Otherwise treat it as a filename inside the app directory.
         do {
-            let dir = try directory()
-            let candidate = dir.appendingPathComponent(storedValue)
-            if fm.fileExists(atPath: candidate.path) {
-                return candidate
+            let dir = try directoryProvider()
+            let url = dir.appendingPathComponent(storedValue)
+            if FileManager.default.fileExists(atPath: url.path) {
+                return url
             }
-
-            // 3) Fallback: if storedValue was an absolute path that no longer exists,
-            // try reconstructing by filename.
-            let last = URL(fileURLWithPath: storedValue).lastPathComponent
-            if !last.isEmpty {
-                let fallback = dir.appendingPathComponent(last)
-                if fm.fileExists(atPath: fallback.path) {
-                    return fallback
-                }
-            }
-
-            // Even if not found, return the most reasonable candidate
-            // so callers can attempt load and show an error state.
-            return candidate
         } catch {
             return nil
         }
+
+        return nil
     }
 
-    // MARK: - Private (Directory Management)
+    // MARK: - Private (Directory Helpers)
 
     private static func ensureDirectory(appSubdirectory: String) throws -> URL {
         let fm = FileManager.default
-        let base = try fm.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        )
 
-        let appDir = base.appendingPathComponent(appFolderName, isDirectory: true)
-        let dir = appDir.appendingPathComponent(appSubdirectory, isDirectory: true)
+        guard let appSupport = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            throw StoreError.directoriesUnavailable
+        }
+
+        let root = appSupport.appendingPathComponent(appFolderName, isDirectory: true)
+        let dir = root.appendingPathComponent(appSubdirectory, isDirectory: true)
 
         if !fm.fileExists(atPath: dir.path) {
             try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         }
 
-        // Exclude directories too.
-        try excludeFromBackup(appDir)
+        // Exclude directories from iCloud backups as well.
+        try excludeFromBackup(root)
         try excludeFromBackup(dir)
 
         return dir
@@ -255,12 +257,19 @@ enum AppPhotoStore {
         let existing = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] ?? [:]
         var mutable = existing
 
-        let timestamp = ExifTimestampFormatter.format(createdAt)
+        let timestamp = ExifTimestampFormatter.localTimestamp(createdAt)
+        let offset = ExifTimestampFormatter.localOffset(createdAt)
 
         // EXIF
         var exif = (mutable[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]
         exif[kCGImagePropertyExifDateTimeOriginal] = timestamp
         exif[kCGImagePropertyExifDateTimeDigitized] = timestamp
+
+        // Timezone offsets (EXIF 2.31). Apple Photos may use these when present.
+        exif[kCGImagePropertyExifOffsetTimeOriginal] = offset
+        exif[kCGImagePropertyExifOffsetTimeDigitized] = offset
+        exif[kCGImagePropertyExifOffsetTime] = offset
+
         mutable[kCGImagePropertyExifDictionary] = exif
 
         // TIFF
@@ -328,40 +337,29 @@ enum AppPhotoStore {
 
     private static func deviceCapacityBytes() -> (available: Int64?, total: Int64?) {
         // Using the home directory is sufficient to query the current volume.
-        let url = URL(fileURLWithPath: NSHomeDirectory())
         do {
-            let values = try url.resourceValues(forKeys: [
-                .volumeAvailableCapacityForImportantUsageKey,
-                .volumeAvailableCapacityKey,
-                .volumeTotalCapacityKey
-            ])
-
-            // NOTE: On some SDKs these properties are Int?, not Int64?, so we normalize to Int64 here.
-            let availableImportant: Int64? = values.volumeAvailableCapacityForImportantUsage.map { Int64($0) }
-            let availableRegular: Int64? = values.volumeAvailableCapacity.map { Int64($0) }
-            let available = availableImportant ?? availableRegular
-
-            let total: Int64? = values.volumeTotalCapacity.map { Int64($0) }
-
+            let values = try FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory())
+            let available = (values[.systemFreeSize] as? NSNumber)?.int64Value
+            let total = (values[.systemSize] as? NSNumber)?.int64Value
             return (available: available, total: total)
         } catch {
             return (available: nil, total: nil)
         }
     }
 
-    private static func directorySizeBytes(at directoryURL: URL) -> Int64 {
+    private static func directorySizeBytes(at url: URL) -> Int64 {
         let fm = FileManager.default
-        let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey]
+        let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey]
 
-        guard let enumerator = fm.enumerator(at: directoryURL, includingPropertiesForKeys: Array(keys)) else {
+        guard let enumerator = fm.enumerator(at: url, includingPropertiesForKeys: keys) else {
             return 0
         }
 
         var total: Int64 = 0
-        for case let url as URL in enumerator {
-            guard let values = try? url.resourceValues(forKeys: keys) else { continue }
-            guard values.isRegularFile == true else { continue }
-            if let size = values.fileSize {
+        for case let fileURL as URL in enumerator {
+            if let values = try? fileURL.resourceValues(forKeys: Set(keys)),
+               values.isRegularFile == true,
+               let size = values.fileSize {
                 total += Int64(size)
             }
         }
@@ -370,40 +368,32 @@ enum AppPhotoStore {
     }
 }
 
-// MARK: - Errors
-
-enum StoreError: Error {
-    case thumbnailGenerationFailed
-    case metadataStampingFailed
-    case lowDiskSpace(availableBytes: Int64, requiredBytes: Int64)
-}
-
-extension StoreError: LocalizedError {
-    var errorDescription: String? {
-        switch self {
-        case .thumbnailGenerationFailed:
-            return "Could not generate thumbnail."
-        case .metadataStampingFailed:
-            return "Could not save photo metadata."
-        case let .lowDiskSpace(availableBytes, requiredBytes):
-            let available = AppPhotoStore.formatBytes(availableBytes)
-            let required = AppPhotoStore.formatBytes(requiredBytes)
-
-            return "Low storage. HobbsCamera needs about \(required) free to save a photo, but your device only has \(available) available. Free up space in Settings - General - iPhone Storage, delete some photos in HobbsCamera, then try again."
-        }
-    }
-}
-
 // MARK: - Utilities
 
 private enum ExifTimestampFormatter {
-    static func format(_ date: Date) -> String {
-        // Use UTC for consistency across devices/time zones.
+    /// EXIF `DateTimeOriginal` does not carry timezone by default, and Apple Photos will interpret it
+    /// as a local-time value. If we write UTC into these fields, Photos will show an 8-hour-shifted
+    /// time for PST/PDT users.
+    ///
+    /// So we:
+    /// - write the local timestamp into the EXIF/TIFF DateTime fields, and
+    /// - also write the ISO 8601 offset fields where supported (OffsetTimeOriginal/Digitized).
+    static func localTimestamp(_ date: Date) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.timeZone = TimeZone.current
         formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
         return formatter.string(from: date)
+    }
+
+    static func localOffset(_ date: Date) -> String {
+        // EXIF offset format is ±HH:MM
+        let seconds = TimeZone.current.secondsFromGMT(for: date)
+        let sign = seconds >= 0 ? "+" : "-"
+        let absSeconds = abs(seconds)
+        let hours = absSeconds / 3600
+        let minutes = (absSeconds % 3600) / 60
+        return String(format: "%@%02d:%02d", sign, hours, minutes)
     }
 }
 

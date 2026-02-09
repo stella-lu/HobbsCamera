@@ -109,7 +109,7 @@ struct CameraView: View {
 
             dismiss()
         } catch {
-            if let storeError = error as? StoreError {
+            if let storeError = error as? AppPhotoStore.StoreError {
                 switch storeError {
                 case .lowDiskSpace:
                     camera.lastErrorMessage = storeError.localizedDescription

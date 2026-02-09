@@ -1,6 +1,7 @@
 // ContentView.swift
 import SwiftUI
 import SwiftData
+import UIKit
 
 struct ContentView: View {
     var body: some View {
@@ -26,8 +27,33 @@ struct LibraryView: View {
     @State private var isSelecting = false
     @State private var selectedIDs: Set<UUID> = []
 
-    @State private var showDeleteConfirmation = false
     @State private var lastErrorMessage: String?
+
+    @StateObject private var photosExporter = PhotosExporter()
+    @State private var showingExportSheet = false
+
+    /// Avoid multiple `.alert` modifiers fighting on device.
+    @State private var activeAlert: ActiveAlert?
+
+    private enum ActiveAlert: Identifiable, Equatable {
+        case deleteConfirmation(count: Int)
+        case photosPermission
+        case exportFinished(message: String)
+        case error(message: String)
+
+        var id: String {
+            switch self {
+            case .deleteConfirmation(let count):
+                return "deleteConfirmation_\(count)"
+            case .photosPermission:
+                return "photosPermission"
+            case .exportFinished(let message):
+                return "exportFinished_\(message)"
+            case .error(let message):
+                return "error_\(message)"
+            }
+        }
+    }
 
     var body: some View {
         Group {
@@ -78,7 +104,6 @@ struct LibraryView: View {
                 }
             }
         }
-        // Hide the "Library" header title while selecting.
         .navigationTitle(isSelecting ? "" : "Library")
         .toolbar {
             ToolbarItemGroup(placement: .topBarLeading) {
@@ -112,8 +137,15 @@ struct LibraryView: View {
                     }
                     .disabled(selectedIDs.isEmpty)
 
+                    Button {
+                        startExportSelectedToApplePhotos()
+                    } label: {
+                        Image(systemName: "square.and.arrow.down")
+                    }
+                    .disabled(selectedIDs.isEmpty)
+
                     Button(role: .destructive) {
-                        showDeleteConfirmation = true
+                        activeAlert = .deleteConfirmation(count: selectedIDs.count)
                     } label: {
                         Image(systemName: "trash")
                     }
@@ -130,26 +162,65 @@ struct LibraryView: View {
                 }
             }
         }
-        .alert("Delete selected photos?", isPresented: $showDeleteConfirmation) {
-            Button("Delete", role: .destructive) {
-                deleteSelected()
+        .sheet(isPresented: $showingExportSheet) {
+            ExportProgressView(exporter: photosExporter) {
+                showingExportSheet = false
             }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This will delete \(selectedCount) selected \(selectedCount == 1 ? "photo" : "photos"). This is permanent. Are you sure?")
+            .presentationDetents([.medium, .large])
         }
-        .alert("Something went wrong", isPresented: Binding(
-            get: { lastErrorMessage != nil },
-            set: { if !$0 { lastErrorMessage = nil } }
-        )) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(lastErrorMessage ?? "")
+        .onChange(of: photosExporter.lastSummaryMessage) { _, newValue in
+            if let newValue {
+                activeAlert = .exportFinished(message: newValue)
+            }
         }
-    }
+        .onChange(of: lastErrorMessage) { _, newValue in
+            if let newValue {
+                activeAlert = .error(message: newValue)
+            }
+        }
+        .alert(item: $activeAlert) { alert in
+            switch alert {
+            case .deleteConfirmation(let count):
+                return Alert(
+                    title: Text("Delete selected photos?"),
+                    message: Text("This will delete \(count) selected \(count == 1 ? "photo" : "photos"). This is permanent. Are you sure?"),
+                    primaryButton: .destructive(Text("Delete")) {
+                        deleteSelected()
+                    },
+                    secondaryButton: .cancel()
+                )
 
-    private var selectedCount: Int {
-        selectedIDs.count
+            case .photosPermission:
+                return Alert(
+                    title: Text("Allow Photos Access"),
+                    message: Text("To save photos to Apple Photos, allow Photos access. HobbsCamera requests add-only access, so it can save without reading your library."),
+                    primaryButton: .default(Text("Open Settings")) {
+                        if let url = URL(string: UIApplication.openSettingsURLString) {
+                            UIApplication.shared.open(url)
+                        }
+                    },
+                    secondaryButton: .cancel()
+                )
+
+            case .exportFinished(let message):
+                return Alert(
+                    title: Text("Export finished"),
+                    message: Text(message),
+                    dismissButton: .cancel(Text("OK")) {
+                        photosExporter.lastSummaryMessage = nil
+                    }
+                )
+
+            case .error(let message):
+                return Alert(
+                    title: Text("Something went wrong"),
+                    message: Text(message),
+                    dismissButton: .cancel(Text("OK")) {
+                        lastErrorMessage = nil
+                    }
+                )
+            }
+        }
     }
 
     // MARK: - Grouping
@@ -159,18 +230,12 @@ struct LibraryView: View {
         let records: [PhotoRecord]
     }
 
-    /// Groups photos by the user's calendar day.
-    /// - Sections: most recent day first
-    /// - Within a day: most recent time first
     private var groupedDays: [DayGroup] {
         let calendar = Calendar.current
-
         let grouped = Dictionary(grouping: photos) { record in
             calendar.startOfDay(for: record.createdAt)
         }
-
         let sortedDays = grouped.keys.sorted(by: { $0 > $1 })
-
         return sortedDays.map { day in
             let records = (grouped[day] ?? []).sorted(by: { $0.createdAt > $1.createdAt })
             return DayGroup(day: day, records: records)
@@ -220,6 +285,46 @@ struct LibraryView: View {
             }
         } catch {
             lastErrorMessage = error.localizedDescription
+        }
+    }
+
+    // MARK: - Export
+
+    private func startExportSelectedToApplePhotos() {
+        let idsToExport = selectedIDs
+        guard !idsToExport.isEmpty else { return }
+
+        let recordsToExport = photos.filter { idsToExport.contains($0.id) }
+
+        Task { @MainActor in
+            let permission = await photosExporter.requestAddOnlyPermissionIfNeeded()
+            guard permission == .allowed || permission == .limited else {
+                activeAlert = .photosPermission
+                return
+            }
+
+            var validItems: [ExportItem] = []
+            var initialFailures: [PhotoExportResult] = []
+
+            for record in recordsToExport {
+                guard let url = record.photoURL else {
+                    initialFailures.append(
+                        PhotoExportResult(
+                            id: record.id,
+                            filename: URL(fileURLWithPath: record.filePath).lastPathComponent,
+                            status: .failure(message: "Missing file URL.")
+                        )
+                    )
+                    continue
+                }
+
+                // Pass the app’s source-of-truth timestamp to PhotosExporter
+                // so Photos uses it for the asset’s displayed date.
+                validItems.append(ExportItem(id: record.id, fileURL: url, createdAt: record.createdAt))
+            }
+
+            showingExportSheet = true
+            await photosExporter.exportToApplePhotos(items: validItems, initialFailures: initialFailures)
         }
     }
 }
@@ -307,7 +412,6 @@ struct PhotoDetailView: View {
 }
 
 /// Loads a local file URL into a SwiftUI `Image` without blocking the main thread.
-/// This is intentionally small and focused - it’s used for thumbnails and full-res images.
 private struct FileImageView<Content: View, Placeholder: View>: View {
     let url: URL?
     let content: (Image) -> Content
