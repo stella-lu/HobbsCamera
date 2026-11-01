@@ -2,6 +2,7 @@
 import SwiftUI
 import SwiftData
 import UIKit
+import CoreLocation
 
 struct ContentView: View {
     var body: some View {
@@ -13,6 +14,7 @@ struct ContentView: View {
 
 struct LibraryView: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.scenePhase) private var scenePhase
 
     /// Most recent first.
     @Query(sort: \PhotoRecord.createdAt, order: .reverse)
@@ -31,22 +33,29 @@ struct LibraryView: View {
 
     @StateObject private var photosExporter = PhotosExporter()
     @State private var showingExportSheet = false
+    @State private var shareRequest: ShareRequest?
 
     /// Avoid multiple `.alert` modifiers fighting on device.
     @State private var activeAlert: ActiveAlert?
 
     private enum ActiveAlert: Identifiable, Equatable {
         case deleteConfirmation(count: Int)
+        case confirmPhotosExport
         case photosPermission
         case exportFinished(message: String)
+        case notice(title: String, message: String)
         case error(message: String)
 
         var id: String {
             switch self {
             case .deleteConfirmation(let count):
                 return "deleteConfirmation_\(count)"
+            case .confirmPhotosExport:
+                return "confirmPhotosExport"
             case .photosPermission:
                 return "photosPermission"
+            case .notice(let title, let message):
+                return "notice_\(title)_\(message)"
             case .exportFinished(let message):
                 return "exportFinished_\(message)"
             case .error(let message):
@@ -126,28 +135,53 @@ struct LibraryView: View {
             }
 
             if isSelecting {
-                ToolbarItemGroup(placement: .topBarTrailing) {
-                    Button("Select all") {
-                        selectedIDs = Set(photos.map { $0.id })
-                    }
-                    .disabled(photos.isEmpty)
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu("Choose") {
+                        Button("Select All") {
+                            selectedIDs = Set(photos.map { $0.id })
+                        }
 
-                    Button("Clear") {
-                        selectedIDs.removeAll()
+                        Menu("Older Than") {
+                            ForEach(RetentionPeriod.allCases) { period in
+                                Button(period.label) {
+                                    selectOlder(than: period)
+                                }
+                            }
+                        }
+
+                        Button("Clear Selection") {
+                            selectedIDs.removeAll()
+                        }
+                        .disabled(selectedIDs.isEmpty)
+                    }
+                }
+
+                ToolbarItemGroup(placement: .bottomBar) {
+                    Button {
+                        shareSelected()
+                    } label: {
+                        Label("Share", systemImage: "square.and.arrow.up")
                     }
                     .disabled(selectedIDs.isEmpty)
 
+                    Spacer()
+
+                    Text(selectedIDs.isEmpty ? "None selected" : "\(selectedIDs.count) selected")
+                        .font(.footnote)
+
+                    Spacer()
+
                     Button {
-                        startExportSelectedToApplePhotos()
+                        activeAlert = .confirmPhotosExport
                     } label: {
-                        Image(systemName: "square.and.arrow.down")
+                        Label("Save to Apple Photos", systemImage: "square.and.arrow.down")
                     }
                     .disabled(selectedIDs.isEmpty)
 
                     Button(role: .destructive) {
                         activeAlert = .deleteConfirmation(count: selectedIDs.count)
                     } label: {
-                        Image(systemName: "trash")
+                        Label("Delete", systemImage: "trash")
                     }
                     .disabled(selectedIDs.isEmpty)
                 }
@@ -167,6 +201,17 @@ struct LibraryView: View {
                 showingExportSheet = false
             }
             .presentationDetents([.medium, .large])
+        }
+        .sheet(item: $shareRequest) { request in
+            ShareSheet(urls: request.urls)
+        }
+        .task {
+            runAutoDelete()
+        }
+        .onChange(of: scenePhase) { _, newValue in
+            if newValue == .active {
+                runAutoDelete()
+            }
         }
         .onChange(of: photosExporter.lastSummaryMessage) { _, newValue in
             if let newValue {
@@ -188,6 +233,23 @@ struct LibraryView: View {
                         deleteSelected()
                     },
                     secondaryButton: .cancel()
+                )
+
+            case .confirmPhotosExport:
+                return Alert(
+                    title: Text("Save to Apple Photos?"),
+                    message: Text("Photos saved here leave HobbsCamera’s private storage. If Google Photos backup is on, they may be uploaded automatically. To avoid that, use Share instead."),
+                    primaryButton: .default(Text("Save to Photos")) {
+                        startExportSelectedToApplePhotos()
+                    },
+                    secondaryButton: .cancel()
+                )
+
+            case .notice(let title, let message):
+                return Alert(
+                    title: Text(title),
+                    message: Text(message),
+                    dismissButton: .cancel(Text("OK"))
                 )
 
             case .photosPermission:
@@ -260,6 +322,31 @@ struct LibraryView: View {
         }
     }
 
+    private func selectOlder(than period: RetentionPeriod) {
+        let matches = PhotoRetention.olderThan(period, in: photos)
+        if matches.isEmpty {
+            activeAlert = .notice(
+                title: "No matching photos",
+                message: "No photos are older than \(period.label). Photos marked Keep aren’t included."
+            )
+        } else {
+            selectedIDs = Set(matches.map { $0.id })
+        }
+    }
+
+    // MARK: - Share
+
+    private func shareSelected() {
+        let selected = photos.filter { selectedIDs.contains($0.id) }
+        let urls = selected.compactMap { $0.photoURL }
+
+        if urls.count == selected.count {
+            shareRequest = ShareRequest(urls: urls)
+        } else {
+            lastErrorMessage = "Couldn’t find the file for \(selected.count - urls.count) of the selected photos."
+        }
+    }
+
     // MARK: - Delete
 
     private func deleteSelected() {
@@ -269,15 +356,7 @@ struct LibraryView: View {
         let recordsToDelete = photos.filter { idsToDelete.contains($0.id) }
 
         do {
-            for record in recordsToDelete {
-                try AppPhotoStore.deletePhotoAndThumbnail(
-                    photoStoredValue: record.filePath,
-                    thumbnailStoredValue: record.thumbnailPath
-                )
-                modelContext.delete(record)
-            }
-
-            try modelContext.save()
+            try PhotoRetention.delete(recordsToDelete, in: modelContext)
 
             withAnimation(.snappy) {
                 selectedIDs.removeAll()
@@ -286,6 +365,17 @@ struct LibraryView: View {
         } catch {
             lastErrorMessage = error.localizedDescription
         }
+    }
+
+    private func runAutoDelete() {
+        let deletedIDs = PhotoRetention.runAutoDeleteIfEnabled(in: modelContext)
+        guard !deletedIDs.isEmpty else { return }
+
+        selectedIDs.subtract(deletedIDs)
+        activeAlert = .notice(
+            title: "Old photos deleted",
+            message: "Auto-delete removed \(deletedIDs.count) \(deletedIDs.count == 1 ? "photo" : "photos"). You can change this in Settings."
+        )
     }
 
     // MARK: - Export
@@ -305,6 +395,7 @@ struct LibraryView: View {
 
             var validItems: [ExportItem] = []
             var initialFailures: [PhotoExportResult] = []
+            var locations: [UUID: CLLocation] = [:]
 
             for record in recordsToExport {
                 guard let url = record.photoURL else {
@@ -321,10 +412,15 @@ struct LibraryView: View {
                 // Pass the app’s source-of-truth timestamp to PhotosExporter
                 // so Photos uses it for the asset’s displayed date.
                 validItems.append(ExportItem(id: record.id, fileURL: url, createdAt: record.createdAt))
+                locations[record.id] = record.clLocation
             }
 
             showingExportSheet = true
-            await photosExporter.exportToApplePhotos(items: validItems, initialFailures: initialFailures)
+            await photosExporter.exportToApplePhotos(
+                items: validItems,
+                initialFailures: initialFailures,
+                locationProvider: { locations[$0.id] }
+            )
         }
     }
 }
@@ -337,44 +433,57 @@ private struct ThumbnailCell: View {
     var showsSelectionChrome: Bool = false
 
     var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 10)
-                .fill(.quaternary)
-
-            FileImageView(url: record.thumbnailURL) { image in
-                image
-                    .resizable()
-                    .scaledToFill()
-            } placeholder: {
-                ProgressView()
+        // The square sets the cell's size, so a photo of any shape fills it and is cropped to fit.
+        RoundedRectangle(cornerRadius: 10)
+            .fill(.quaternary)
+            .aspectRatio(1.0, contentMode: .fit)
+            .overlay {
+                FileImageView(url: record.thumbnailURL) { image in
+                    image
+                        .resizable()
+                        .scaledToFill()
+                } placeholder: {
+                    ProgressView()
+                }
             }
             .clipShape(RoundedRectangle(cornerRadius: 10))
-
-            if showsSelectionChrome {
-                RoundedRectangle(cornerRadius: 10)
-                    .strokeBorder(isSelected ? Color.accentColor : Color.clear, lineWidth: 3)
-
-                VStack {
-                    HStack {
-                        Spacer()
-                        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                            .font(.title3)
-                            .symbolRenderingMode(.hierarchical)
-                            .padding(6)
-                    }
-                    Spacer()
+            .overlay(alignment: .bottomLeading) {
+                if record.isKept {
+                    Image(systemName: "pin.fill")
+                        .font(.caption)
+                        .foregroundStyle(.white)
+                        .padding(5)
+                        .background(.black.opacity(0.6), in: Circle())
+                        .padding(6)
+                        .accessibilityLabel("Kept")
                 }
-                .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
             }
-        }
-        .aspectRatio(1.0, contentMode: .fit)
-        .contentShape(RoundedRectangle(cornerRadius: 10))
-        .accessibilityLabel("Photo taken \(record.createdAt.formatted(date: .abbreviated, time: .shortened))")
+            .overlay(alignment: .topTrailing) {
+                if showsSelectionChrome {
+                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                        .font(.title3)
+                        .symbolRenderingMode(.hierarchical)
+                        .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                        .padding(6)
+                }
+            }
+            .overlay {
+                if showsSelectionChrome {
+                    RoundedRectangle(cornerRadius: 10)
+                        .strokeBorder(isSelected ? Color.accentColor : Color.clear, lineWidth: 3)
+                }
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 10))
+            .accessibilityLabel("Photo taken \(record.createdAt.formatted(date: .abbreviated, time: .shortened))")
     }
 }
 
 struct PhotoDetailView: View {
+    @Environment(\.modelContext) private var modelContext
+
     let record: PhotoRecord
+
+    @State private var shareRequest: ShareRequest?
 
     var body: some View {
         ScrollView {
@@ -394,12 +503,15 @@ struct PhotoDetailView: View {
                     .aspectRatio(1.0, contentMode: .fit)
                 }
 
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Timestamp")
+                PhotoMetadataView(record: record)
+                    .padding(.horizontal, 4)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle("Keep", isOn: keepBinding)
                         .font(.headline)
 
-                    Text(record.createdAt.formatted(date: .long, time: .standard))
-                        .font(.body)
+                    Text("Kept photos are skipped by auto-delete and “older than” selection.")
+                        .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 .padding(.horizontal, 4)
@@ -408,6 +520,31 @@ struct PhotoDetailView: View {
         }
         .navigationTitle("Photo")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    if let url = record.photoURL {
+                        shareRequest = ShareRequest(urls: [url])
+                    }
+                } label: {
+                    Label("Share", systemImage: "square.and.arrow.up")
+                }
+                .disabled(record.photoURL == nil)
+            }
+        }
+        .sheet(item: $shareRequest) { request in
+            ShareSheet(urls: request.urls)
+        }
+    }
+
+    private var keepBinding: Binding<Bool> {
+        Binding(
+            get: { record.isKept },
+            set: { newValue in
+                record.isKept = newValue
+                try? modelContext.save()
+            }
+        )
     }
 }
 

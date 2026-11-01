@@ -13,7 +13,7 @@ import UIKit
 ///
 /// Notes:
 /// - Both directories (and files) are excluded from iCloud backups.
-/// - Full-res JPEGs are stamped to ensure timestamp metadata is present.
+/// - Full-res JPEGs are stamped to ensure timestamp and location metadata is present.
 /// - This file also provides URL resolution helpers to support:
 ///   - portable persistence (store filenames)
 ///   - legacy persistence (absolute paths from older dev runs)
@@ -34,9 +34,9 @@ enum AppPhotoStore {
 
     // MARK: - Public API (Save)
 
-    /// Saves the photo to private storage, stamps timestamp metadata, and returns the saved photo URL.
+    /// Saves the photo to private storage, stamps timestamp and location metadata, and returns the saved photo URL.
     /// New code should store `url.lastPathComponent` (the filename) in SwiftData, not the absolute path.
-    static func saveJPEGToPrivateLibrary(_ jpegData: Data, createdAt: Date) throws -> URL {
+    static func saveJPEGToPrivateLibrary(_ jpegData: Data, createdAt: Date, location: CapturedLocation? = nil) throws -> URL {
         // Phase 4: guard against low-storage writes before touching disk.
         // We include a small estimate for the thumbnail too.
         try assertEnoughDiskSpaceForSave(estimatedWriteBytes: Int64(jpegData.count) + 1_200_000)
@@ -44,7 +44,7 @@ enum AppPhotoStore {
         let filename = "\(UUID().uuidString).jpg"
         let url = try photosDirectoryURL().appendingPathComponent(filename)
 
-        let stampedData = try stampJPEGTimestampMetadata(jpegData: jpegData, createdAt: createdAt)
+        let stampedData = try stampJPEGMetadata(jpegData: jpegData, createdAt: createdAt, location: location)
         try stampedData.write(to: url, options: [.atomic])
 
         try excludeFromBackup(url)
@@ -162,7 +162,7 @@ enum AppPhotoStore {
             case .directoriesUnavailable:
                 return "Could not access the app’s photo storage."
             case .metadataStampingFailed:
-                return "Could not stamp timestamp metadata into the photo."
+                return "Could not stamp metadata into the photo."
             case .thumbnailGenerationFailed:
                 return "Could not generate a thumbnail for this photo."
             case .lowDiskSpace(let availableBytes, let requiredBytes):
@@ -234,15 +234,16 @@ enum AppPhotoStore {
 
     // MARK: - Private (Metadata Stamping)
 
-    /// Ensures the output JPEG includes timestamp metadata.
+    /// Ensures the output JPEG includes timestamp and location metadata.
     ///
     /// We stamp:
     /// - EXIF DateTimeOriginal
     /// - EXIF DateTimeDigitized
     /// - TIFF DateTime
+    /// - GPS position, accuracy, and fix time (when a location is available)
     ///
     /// Format required by EXIF is: "yyyy:MM:dd HH:mm:ss"
-    private static func stampJPEGTimestampMetadata(jpegData: Data, createdAt: Date) throws -> Data {
+    private static func stampJPEGMetadata(jpegData: Data, createdAt: Date, location: CapturedLocation?) throws -> Data {
         guard let source = CGImageSourceCreateWithData(jpegData as CFData, nil) else {
             throw StoreError.metadataStampingFailed
         }
@@ -277,6 +278,11 @@ enum AppPhotoStore {
         tiff[kCGImagePropertyTIFFDateTime] = timestamp
         mutable[kCGImagePropertyTIFFDictionary] = tiff
 
+        // GPS
+        if let location {
+            mutable[kCGImagePropertyGPSDictionary] = gpsDictionary(for: location)
+        }
+
         let outData = NSMutableData()
         guard let dest = CGImageDestinationCreateWithData(
             outData as CFMutableData,
@@ -299,6 +305,26 @@ enum AppPhotoStore {
         }
 
         return outData as Data
+    }
+
+    /// EXIF stores GPS coordinates as positive values plus a hemisphere reference, and the fix time in UTC.
+    private static func gpsDictionary(for location: CapturedLocation) -> [CFString: Any] {
+        var gps: [CFString: Any] = [
+            kCGImagePropertyGPSLatitude: abs(location.latitude),
+            kCGImagePropertyGPSLatitudeRef: location.latitude >= 0 ? "N" : "S",
+            kCGImagePropertyGPSLongitude: abs(location.longitude),
+            kCGImagePropertyGPSLongitudeRef: location.longitude >= 0 ? "E" : "W",
+            kCGImagePropertyGPSHPositioningError: location.horizontalAccuracy,
+            kCGImagePropertyGPSDateStamp: ExifTimestampFormatter.gpsDate(location.timestamp),
+            kCGImagePropertyGPSTimeStamp: ExifTimestampFormatter.gpsTime(location.timestamp)
+        ]
+
+        if let altitude = location.altitude {
+            gps[kCGImagePropertyGPSAltitude] = abs(altitude)
+            gps[kCGImagePropertyGPSAltitudeRef] = altitude >= 0 ? 0 : 1
+        }
+
+        return gps
     }
 
     // MARK: - Private (Delete Helpers)
@@ -383,6 +409,23 @@ private enum ExifTimestampFormatter {
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone.current
         formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
+        return formatter.string(from: date)
+    }
+
+    /// GPS date and time fields are always UTC.
+    static func gpsDate(_ date: Date) -> String {
+        utcString(date, format: "yyyy:MM:dd")
+    }
+
+    static func gpsTime(_ date: Date) -> String {
+        utcString(date, format: "HH:mm:ss.SS")
+    }
+
+    private static func utcString(_ date: Date, format: String) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.dateFormat = format
         return formatter.string(from: date)
     }
 

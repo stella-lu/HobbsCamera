@@ -415,6 +415,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = "";
 				INFOPLIST_KEY_LSApplicationCategoryType = "";
 				INFOPLIST_KEY_NSCameraUsageDescription = "This app uses the camera to take photos that stay only on your device.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "HobbsCamera records your location with each photo, so you have proof of where it was taken. It stays on your device.";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Allow HobbsCamera to save selected photos to Apple Photos.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -449,6 +450,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = "";
 				INFOPLIST_KEY_LSApplicationCategoryType = "";
 				INFOPLIST_KEY_NSCameraUsageDescription = "This app uses the camera to take photos that stay only on your device.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "HobbsCamera records your location with each photo, so you have proof of where it was taken. It stays on your device.";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Allow HobbsCamera to save selected photos to Apple Photos.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
