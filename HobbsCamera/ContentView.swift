@@ -9,6 +9,7 @@ struct ContentView: View {
         NavigationStack {
             LibraryView()
         }
+        .preferredColorScheme(.dark)
     }
 }
 
@@ -21,13 +22,14 @@ struct LibraryView: View {
     private var photos: [PhotoRecord]
 
     private let columns = [
-        GridItem(.flexible(), spacing: 6),
-        GridItem(.flexible(), spacing: 6),
-        GridItem(.flexible(), spacing: 6)
+        GridItem(.flexible(), spacing: 2),
+        GridItem(.flexible(), spacing: 2),
+        GridItem(.flexible(), spacing: 2)
     ]
 
     @State private var isSelecting = false
     @State private var selectedIDs: Set<UUID> = []
+    @State private var showingCamera = false
 
     @State private var lastErrorMessage: String?
 
@@ -65,136 +67,75 @@ struct LibraryView: View {
     }
 
     var body: some View {
-        Group {
+        ZStack(alignment: .bottom) {
+            Theme.background.ignoresSafeArea()
+
             if photos.isEmpty {
-                ContentUnavailableView(
-                    "No photos yet",
-                    systemImage: "camera",
-                    description: Text("Photos stay inside this app unless you export them.")
-                )
-                .padding()
+                emptyState
             } else {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 14) {
-                        ForEach(groupedDays, id: \.day) { group in
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text(dayHeaderString(for: group.day))
-                                    .font(.headline)
-                                    .padding(.horizontal, 8)
-
-                                LazyVGrid(columns: columns, spacing: 6) {
-                                    ForEach(group.records) { record in
-                                        if isSelecting {
-                                            Button {
-                                                toggleSelection(for: record)
-                                            } label: {
-                                                ThumbnailCell(
-                                                    record: record,
-                                                    isSelected: selectedIDs.contains(record.id),
-                                                    showsSelectionChrome: true
-                                                )
-                                            }
-                                            .buttonStyle(.plain)
-                                        } else {
-                                            NavigationLink {
-                                                PhotoDetailView(record: record)
-                                            } label: {
-                                                ThumbnailCell(record: record)
-                                            }
-                                            .buttonStyle(.plain)
-                                        }
-                                    }
-                                }
-                                .padding(.horizontal, 8)
-                            }
-                        }
-                    }
-                    .padding(.vertical, 8)
-                }
+                photoGrid
             }
+
+            bottomControls
         }
-        .navigationTitle(isSelecting ? "" : "Library")
+        .navigationTitle(isSelecting ? selectionTitle : "Library")
+        .navigationBarTitleDisplayMode(isSelecting ? .inline : .large)
         .toolbar {
-            ToolbarItemGroup(placement: .topBarLeading) {
-                NavigationLink {
-                    SettingsView()
-                } label: {
-                    Image(systemName: "gearshape")
-                }
-                .disabled(isSelecting)
-
-                Button(isSelecting ? "Done" : "Select") {
-                    withAnimation(.snappy) {
-                        isSelecting.toggle()
-                        if !isSelecting {
-                            selectedIDs.removeAll()
-                        }
-                    }
-                }
-                .disabled(photos.isEmpty)
-            }
-
             if isSelecting {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Done") {
+                        setSelecting(false)
+                    }
+                    .fontWeight(.semibold)
+                }
+
                 ToolbarItem(placement: .topBarTrailing) {
-                    Menu("Choose") {
-                        Button("Select All") {
+                    Menu {
+                        Button {
                             selectedIDs = Set(photos.map { $0.id })
+                        } label: {
+                            Label("Select All", systemImage: "checkmark.circle")
                         }
 
-                        Menu("Older Than") {
+                        Menu {
                             ForEach(RetentionPeriod.allCases) { period in
                                 Button(period.label) {
                                     selectOlder(than: period)
                                 }
                             }
+                        } label: {
+                            Label("Older Than", systemImage: "calendar.badge.clock")
                         }
 
-                        Button("Clear Selection") {
+                        Button {
                             selectedIDs.removeAll()
+                        } label: {
+                            Label("Clear Selection", systemImage: "xmark.circle")
                         }
                         .disabled(selectedIDs.isEmpty)
-                    }
-                }
-
-                ToolbarItemGroup(placement: .bottomBar) {
-                    Button {
-                        shareSelected()
                     } label: {
-                        Label("Share", systemImage: "square.and.arrow.up")
+                        Label("Choose", systemImage: "ellipsis.circle")
                     }
-                    .disabled(selectedIDs.isEmpty)
-
-                    Spacer()
-
-                    Text(selectedIDs.isEmpty ? "None selected" : "\(selectedIDs.count) selected")
-                        .font(.footnote)
-
-                    Spacer()
-
-                    Button {
-                        activeAlert = .confirmPhotosExport
-                    } label: {
-                        Label("Save to Apple Photos", systemImage: "square.and.arrow.down")
-                    }
-                    .disabled(selectedIDs.isEmpty)
-
-                    Button(role: .destructive) {
-                        activeAlert = .deleteConfirmation(count: selectedIDs.count)
-                    } label: {
-                        Label("Delete", systemImage: "trash")
-                    }
-                    .disabled(selectedIDs.isEmpty)
                 }
             } else {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .topBarLeading) {
                     NavigationLink {
-                        CameraView()
-                            .navigationBarBackButtonHidden(true)
+                        SettingsView()
                     } label: {
-                        Label("Camera", systemImage: "camera.fill")
+                        Label("Settings", systemImage: "gearshape")
                     }
                 }
+
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Select") {
+                        setSelecting(true)
+                    }
+                    .disabled(photos.isEmpty)
+                }
             }
+        }
+        .fullScreenCover(isPresented: $showingCamera) {
+            CameraView()
         }
         .sheet(isPresented: $showingExportSheet) {
             ExportProgressView(exporter: photosExporter) {
@@ -206,6 +147,9 @@ struct LibraryView: View {
             ShareSheet(urls: request.urls)
         }
         .task {
+            #if DEBUG
+            SampleData.loadIfRequested(into: modelContext)
+            #endif
             runAutoDelete()
         }
         .onChange(of: scenePhase) { _, newValue in
@@ -285,6 +229,168 @@ struct LibraryView: View {
         }
     }
 
+    // MARK: - Content
+
+    private var photoGrid: some View {
+        ScrollView {
+            HStack(spacing: 6) {
+                Image(systemName: "lock.fill")
+                Text("\(photos.count) \(photos.count == 1 ? "photo" : "photos") · Private to this app")
+            }
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 20)
+            .padding(.bottom, 8)
+
+            LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
+                ForEach(groupedDays, id: \.day) { group in
+                    Section {
+                        LazyVGrid(columns: columns, spacing: 2) {
+                            ForEach(group.records) { record in
+                                gridItem(for: record)
+                            }
+                        }
+                        .padding(.bottom, 20)
+                    } header: {
+                        dayHeader(for: group)
+                    }
+                }
+            }
+            .padding(.bottom, 140)
+        }
+    }
+
+    @ViewBuilder
+    private func gridItem(for record: PhotoRecord) -> some View {
+        if isSelecting {
+            Button {
+                toggleSelection(for: record)
+            } label: {
+                ThumbnailCell(
+                    record: record,
+                    isSelected: selectedIDs.contains(record.id),
+                    showsSelectionChrome: true
+                )
+            }
+            .buttonStyle(.plain)
+        } else {
+            NavigationLink {
+                PhotoDetailView(record: record)
+            } label: {
+                ThumbnailCell(record: record)
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private func dayHeader(for group: DayGroup) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(dayTitle(for: group.day))
+                .font(.headline)
+            Spacer()
+            Text("\(group.records.count)")
+                .font(.subheadline.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 6)
+        .padding(.bottom, 10)
+        .background(Theme.background.opacity(0.92))
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 18) {
+            ZStack {
+                Circle()
+                    .fill(Color.accentColor.opacity(0.12))
+                    .frame(width: 112, height: 112)
+                Image(systemName: "camera.aperture")
+                    .font(.system(size: 48, weight: .light))
+                    .foregroundStyle(Color.accentColor)
+            }
+
+            VStack(spacing: 8) {
+                Text("No photos yet")
+                    .font(.title2.weight(.semibold))
+                Text("Snap your Hobbs, tach and fuel receipts. Each photo keeps its time and location, and stays private to this app.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .padding(.horizontal, 40)
+        }
+        .frame(maxHeight: .infinity)
+        .padding(.bottom, 120)
+    }
+
+    @ViewBuilder
+    private var bottomControls: some View {
+        if isSelecting {
+            selectionBar
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+        } else {
+            ShutterButton {
+                showingCamera = true
+            }
+            .accessibilityLabel("Open camera")
+            .padding(.bottom, 16)
+            .frame(maxWidth: .infinity)
+            .background(alignment: .bottom) {
+                LinearGradient(colors: [.clear, .black.opacity(0.85)], startPoint: .top, endPoint: .bottom)
+                    .frame(height: 170)
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+            }
+            .transition(.opacity)
+        }
+    }
+
+    private var selectionBar: some View {
+        let hasSelection = !selectedIDs.isEmpty
+
+        return HStack(spacing: 0) {
+            selectionAction("Share", systemImage: "square.and.arrow.up") {
+                shareSelected()
+            }
+            selectionAction("Photos", systemImage: "photo.badge.arrow.down") {
+                activeAlert = .confirmPhotosExport
+            }
+            selectionAction("Delete", systemImage: "trash", tint: Theme.danger) {
+                activeAlert = .deleteConfirmation(count: selectedIDs.count)
+            }
+        }
+        .disabled(!hasSelection)
+        .opacity(hasSelection ? 1 : 0.45)
+        .padding(.vertical, 10)
+        .glassCapsule()
+    }
+
+    private func selectionAction(
+        _ title: String,
+        systemImage: String,
+        tint: Color = .primary,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            VStack(spacing: 4) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 19, weight: .medium))
+                Text(title)
+                    .font(.caption2.weight(.medium))
+            }
+            .foregroundStyle(tint)
+            .frame(maxWidth: .infinity)
+        }
+        .accessibilityLabel(title == "Photos" ? "Save to Apple Photos" : title)
+    }
+
+    private var selectionTitle: String {
+        selectedIDs.isEmpty ? "Select Photos" : "\(selectedIDs.count) Selected"
+    }
+
     // MARK: - Grouping
 
     private struct DayGroup {
@@ -304,15 +410,29 @@ struct LibraryView: View {
         }
     }
 
-    private func dayHeaderString(for day: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale.current
-        formatter.timeZone = TimeZone.current
-        formatter.dateFormat = "EEEE MMMM d, yyyy"
-        return formatter.string(from: day)
+    private func dayTitle(for day: Date) -> String {
+        let calendar = Calendar.current
+        if calendar.isDateInToday(day) { return "Today" }
+        if calendar.isDateInYesterday(day) { return "Yesterday" }
+
+        let sameYear = calendar.isDate(day, equalTo: Date(), toGranularity: .year)
+        return day.formatted(
+            sameYear
+                ? .dateTime.weekday(.abbreviated).month(.abbreviated).day()
+                : .dateTime.month(.abbreviated).day().year()
+        )
     }
 
     // MARK: - Selection
+
+    private func setSelecting(_ selecting: Bool) {
+        withAnimation(.snappy) {
+            isSelecting = selecting
+            if !selecting {
+                selectedIDs.removeAll()
+            }
+        }
+    }
 
     private func toggleSelection(for record: PhotoRecord) {
         if selectedIDs.contains(record.id) {
@@ -357,11 +477,7 @@ struct LibraryView: View {
 
         do {
             try PhotoRetention.delete(recordsToDelete, in: modelContext)
-
-            withAnimation(.snappy) {
-                selectedIDs.removeAll()
-                isSelecting = false
-            }
+            setSelecting(false)
         } catch {
             lastErrorMessage = error.localizedDescription
         }
@@ -434,8 +550,8 @@ private struct ThumbnailCell: View {
 
     var body: some View {
         // The square sets the cell's size, so a photo of any shape fills it and is cropped to fit.
-        RoundedRectangle(cornerRadius: 10)
-            .fill(.quaternary)
+        Rectangle()
+            .fill(Theme.card)
             .aspectRatio(1.0, contentMode: .fit)
             .overlay {
                 FileImageView(url: record.thumbnailURL) { image in
@@ -446,34 +562,57 @@ private struct ThumbnailCell: View {
                     ProgressView()
                 }
             }
-            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(alignment: .bottom) {
+                LinearGradient(colors: [.clear, .black.opacity(0.65)], startPoint: .top, endPoint: .bottom)
+                    .frame(height: 36)
+            }
+            .clipped()
             .overlay(alignment: .bottomLeading) {
+                HStack(spacing: 4) {
+                    Text(record.createdAt.formatted(date: .omitted, time: .shortened))
+                        .font(.caption2.weight(.semibold).monospacedDigit())
+                    if record.locationStatus != .live {
+                        Image(systemName: record.locationStatus.style.icon)
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(record.locationStatus.style.color)
+                    }
+                }
+                .foregroundStyle(.white)
+                .padding(6)
+            }
+            .overlay(alignment: .bottomTrailing) {
                 if record.isKept {
                     Image(systemName: "pin.fill")
-                        .font(.caption)
+                        .font(.system(size: 10, weight: .bold))
                         .foregroundStyle(.white)
-                        .padding(5)
-                        .background(.black.opacity(0.6), in: Circle())
                         .padding(6)
                         .accessibilityLabel("Kept")
                 }
             }
+            .overlay {
+                if showsSelectionChrome && isSelected {
+                    Rectangle()
+                        .fill(.white.opacity(0.18))
+                }
+            }
             .overlay(alignment: .topTrailing) {
                 if showsSelectionChrome {
-                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                        .font(.title3)
-                        .symbolRenderingMode(.hierarchical)
-                        .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
-                        .padding(6)
+                    ZStack {
+                        Circle()
+                            .fill(isSelected ? Color.accentColor : .black.opacity(0.25))
+                        Circle()
+                            .strokeBorder(.white, lineWidth: 1.5)
+                        if isSelected {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(.black)
+                        }
+                    }
+                    .frame(width: 22, height: 22)
+                    .padding(6)
                 }
             }
-            .overlay {
-                if showsSelectionChrome {
-                    RoundedRectangle(cornerRadius: 10)
-                        .strokeBorder(isSelected ? Color.accentColor : Color.clear, lineWidth: 3)
-                }
-            }
-            .contentShape(RoundedRectangle(cornerRadius: 10))
+            .contentShape(Rectangle())
             .accessibilityLabel("Photo taken \(record.createdAt.formatted(date: .abbreviated, time: .shortened))")
     }
 }
@@ -487,38 +626,44 @@ struct PhotoDetailView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 16) {
                 FileImageView(url: record.photoURL) { image in
                     image
                         .resizable()
                         .scaledToFit()
-                        .clipShape(RoundedRectangle(cornerRadius: 16))
+                        .frame(maxWidth: .infinity)
                 } placeholder: {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 16)
-                            .fill(.quaternary)
-                        ProgressView()
+                    Rectangle()
+                        .fill(Theme.card)
+                        .aspectRatio(4.0 / 3.0, contentMode: .fit)
+                        .overlay { ProgressView() }
+                }
+
+                VStack(alignment: .leading, spacing: 16) {
+                    PhotoMetadataView(record: record)
+
+                    Toggle(isOn: keepBinding) {
+                        HStack(spacing: 12) {
+                            Image(systemName: "pin.fill")
+                                .foregroundStyle(record.isKept ? Color.accentColor : .secondary)
+                                .frame(width: 24)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Keep")
+                                    .font(.body.weight(.semibold))
+                                Text("Never auto-deleted or included in “older than” selection.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
                     }
-                    .frame(maxWidth: .infinity)
-                    .aspectRatio(1.0, contentMode: .fit)
+                    .card()
                 }
-
-                PhotoMetadataView(record: record)
-                    .padding(.horizontal, 4)
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Toggle("Keep", isOn: keepBinding)
-                        .font(.headline)
-
-                    Text("Kept photos are skipped by auto-delete and “older than” selection.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.horizontal, 4)
+                .padding(.horizontal, 16)
             }
-            .padding()
+            .padding(.bottom, 24)
         }
-        .navigationTitle("Photo")
+        .background(Theme.background)
+        .navigationTitle(record.createdAt.formatted(.dateTime.month(.abbreviated).day().year()))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -594,14 +739,15 @@ private struct FileImageView<Content: View, Placeholder: View>: View {
             return
         }
 
-        do {
-            let data = try Data(contentsOf: url)
-            guard let image = UIImage(data: data) else {
-                loadError = "Failed to decode image."
-                return
-            }
+        // Read and decode off the main thread so scrolling and full-size photos stay smooth.
+        let image = await Task.detached(priority: .userInitiated) { () -> UIImage? in
+            guard let data = try? Data(contentsOf: url) else { return nil }
+            return UIImage(data: data)?.preparingForDisplay()
+        }.value
+
+        if let image {
             uiImage = image
-        } catch {
+        } else {
             loadError = "Failed to load image."
         }
     }
