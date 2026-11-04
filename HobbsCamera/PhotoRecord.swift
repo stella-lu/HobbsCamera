@@ -38,21 +38,9 @@ final class PhotoRecord {
     // Location and time zone at capture.
     // All optional, so photos saved before these existed migrate automatically and read as nil.
 
+    /// Nil when no location was available at capture.
     var latitude: Double?
     var longitude: Double?
-
-    /// Radius of uncertainty in meters.
-    var horizontalAccuracy: Double?
-
-    /// Meters above mean sea level.
-    var altitude: Double?
-    var verticalAccuracy: Double?
-
-    /// When the location fix was determined. This can differ from `createdAt`.
-    var locationTimestamp: Date?
-
-    /// Raw value of `LocationStatus`. Nil for photos saved before location was recorded.
-    var locationStatusRaw: String?
 
     /// Time zone of the phone at capture, so local time stays correct after travelling.
     var captureTimeZoneIdentifier: String?
@@ -63,7 +51,7 @@ final class PhotoRecord {
         createdAt: Date,
         thumbnailPath: String,
         flags: Int = 0,
-        locationFix: LocationFix? = nil,
+        location: CapturedLocation? = nil,
         captureTimeZoneIdentifier: String? = nil
     ) {
         self.id = id
@@ -71,13 +59,8 @@ final class PhotoRecord {
         self.createdAt = createdAt
         self.thumbnailPath = thumbnailPath
         self.flags = flags
-        self.latitude = locationFix?.location?.latitude
-        self.longitude = locationFix?.location?.longitude
-        self.horizontalAccuracy = locationFix?.location?.horizontalAccuracy
-        self.altitude = locationFix?.location?.altitude
-        self.verticalAccuracy = locationFix?.location?.verticalAccuracy
-        self.locationTimestamp = locationFix?.location?.timestamp
-        self.locationStatusRaw = locationFix?.status.rawValue
+        self.latitude = location?.latitude
+        self.longitude = location?.longitude
         self.captureTimeZoneIdentifier = captureTimeZoneIdentifier
     }
 }
@@ -109,24 +92,14 @@ extension PhotoRecord {
         set { flags = newValue ? flags | Self.keepFlag : flags & ~Self.keepFlag }
     }
 
-    var locationStatus: LocationStatus? {
-        locationStatusRaw.flatMap(LocationStatus.init(rawValue:))
-    }
-
     var captureTimeZone: TimeZone {
         captureTimeZoneIdentifier.flatMap(TimeZone.init(identifier:)) ?? .current
     }
 
-    /// The location for Apple Photos, including the fix's own accuracy and time.
+    /// The location for Apple Photos.
     var clLocation: CLLocation? {
         guard let latitude, let longitude else { return nil }
-        return CLLocation(
-            coordinate: CLLocationCoordinate2D(latitude: latitude, longitude: longitude),
-            altitude: altitude ?? 0,
-            horizontalAccuracy: horizontalAccuracy ?? -1,
-            verticalAccuracy: verticalAccuracy ?? -1,
-            timestamp: locationTimestamp ?? createdAt
-        )
+        return CLLocation(latitude: latitude, longitude: longitude)
     }
 
     var mapsURL: URL? {

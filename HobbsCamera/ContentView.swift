@@ -568,16 +568,9 @@ private struct ThumbnailCell: View {
             }
             .clipped()
             .overlay(alignment: .bottomLeading) {
-                HStack(spacing: 4) {
-                    Text(record.createdAt.formatted(date: .omitted, time: .shortened))
-                        .font(.caption2.weight(.semibold).monospacedDigit())
-                    if record.locationStatus != .live {
-                        Image(systemName: record.locationStatus.style.icon)
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(record.locationStatus.style.color)
-                    }
-                }
-                .foregroundStyle(.white)
+                Text(record.createdAt.formatted(date: .omitted, time: .shortened))
+                    .font(.caption2.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(.white)
                 .padding(6)
             }
             .overlay(alignment: .bottomTrailing) {

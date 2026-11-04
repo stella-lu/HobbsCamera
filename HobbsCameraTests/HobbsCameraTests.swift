@@ -5,6 +5,7 @@
 //  Created by Stella Lu on 1/18/26.
 //
 
+import CoreData
 import CoreLocation
 import Foundation
 import ImageIO
@@ -60,75 +61,19 @@ private func makeRecord(ageDays: Double, now: Date, kept: Bool = false) -> Photo
 
 // MARK: - Choosing a location
 
-struct LocationFixPolicyTests {
-    @Test func usesLiveFixNearCapture() {
-        let fix = LocationFixPolicy.resolve(
-            recent: [makeLocation(secondsBeforeCapture: 2)],
-            lastKnown: nil,
-            captureDate: captureDate
-        )
-        #expect(fix.status == .live)
-        #expect(fix.location?.latitude == 47.5)
+struct CapturedLocationTests {
+    @Test func usesRecentFix() {
+        let location = CapturedLocation.forCapture(at: captureDate, from: makeLocation(secondsBeforeCapture: 30))
+        #expect(location?.latitude == 47.5)
     }
 
-    @Test func prefersGoodFixClosestToShutter() {
-        let fix = LocationFixPolicy.resolve(
-            recent: [
-                makeLocation(latitude: 1, accuracy: 5, secondsBeforeCapture: 20),
-                makeLocation(latitude: 2, accuracy: 30, secondsBeforeCapture: 1)
-            ],
-            lastKnown: nil,
-            captureDate: captureDate
-        )
-        #expect(fix.location?.latitude == 2)
+    @Test func ignoresStaleFix() {
+        #expect(CapturedLocation.forCapture(at: captureDate, from: makeLocation(secondsBeforeCapture: 10 * 60)) == nil)
     }
 
-    @Test func usesMostAccurateFixWhenNoneAreGood() {
-        let fix = LocationFixPolicy.resolve(
-            recent: [
-                makeLocation(latitude: 1, accuracy: 500),
-                makeLocation(latitude: 2, accuracy: 200)
-            ],
-            lastKnown: nil,
-            captureDate: captureDate
-        )
-        #expect(fix.status == .live)
-        #expect(fix.location?.latitude == 2)
-    }
-
-    @Test func labelsOlderFixAsLastKnown() {
-        let fix = LocationFixPolicy.resolve(
-            recent: [],
-            lastKnown: makeLocation(secondsBeforeCapture: 10 * 60),
-            captureDate: captureDate
-        )
-        #expect(fix.status == .lastKnown)
-        #expect(fix.location != nil)
-    }
-
-    @Test func rejectsFixOlderThanLimit() {
-        let fix = LocationFixPolicy.resolve(
-            recent: [],
-            lastKnown: makeLocation(secondsBeforeCapture: 20 * 60),
-            captureDate: captureDate
-        )
-        #expect(fix.status == .unavailable)
-        #expect(fix.location == nil)
-    }
-
-    @Test func ignoresInvalidFix() {
-        let fix = LocationFixPolicy.resolve(
-            recent: [makeLocation(accuracy: -1)],
-            lastKnown: nil,
-            captureDate: captureDate
-        )
-        #expect(fix.status == .unavailable)
-    }
-
-    @Test func goodFixMustBeAccurateAndCurrent() {
-        #expect(LocationFixPolicy.isGood(makeLocation(accuracy: 20), forCaptureAt: captureDate))
-        #expect(!LocationFixPolicy.isGood(makeLocation(accuracy: 500), forCaptureAt: captureDate))
-        #expect(!LocationFixPolicy.isGood(makeLocation(accuracy: 20, secondsBeforeCapture: 120), forCaptureAt: captureDate))
+    @Test func ignoresInvalidOrMissingFix() {
+        #expect(CapturedLocation.forCapture(at: captureDate, from: makeLocation(accuracy: -1)) == nil)
+        #expect(CapturedLocation.forCapture(at: captureDate, from: nil) == nil)
     }
 }
 
@@ -178,7 +123,7 @@ struct PhotoMetadataStampingTests {
         let location = CapturedLocation(makeLocation(latitude: 40, longitude: -105, altitude: 1600))
         let record = try await PhotoSavePipeline().run(
             capture: PhotoCapture(jpegData: makeJPEG(), createdAt: captureDate),
-            locationFix: LocationFix(status: .live, location: location)
+            location: location
         )
         defer {
             try? AppPhotoStore.deletePhotoAndThumbnail(
@@ -189,9 +134,6 @@ struct PhotoMetadataStampingTests {
 
         #expect(record.latitude == 40)
         #expect(record.longitude == -105)
-        #expect(record.altitude == 1600)
-        #expect(record.locationStatus == .live)
-        #expect(record.locationTimestamp == captureDate)
         #expect(record.captureTimeZoneIdentifier == TimeZone.current.identifier)
         #expect(record.clLocation?.coordinate.latitude == 40)
         #expect(record.mapsURL != nil)
@@ -204,7 +146,7 @@ struct PhotoMetadataStampingTests {
     @Test func pipelineRecordsMissingLocation() async throws {
         let record = try await PhotoSavePipeline().run(
             capture: PhotoCapture(jpegData: makeJPEG(), createdAt: captureDate),
-            locationFix: LocationFix(status: .denied, location: nil)
+            location: nil
         )
         defer {
             try? AppPhotoStore.deletePhotoAndThumbnail(
@@ -214,7 +156,6 @@ struct PhotoMetadataStampingTests {
         }
 
         #expect(record.latitude == nil)
-        #expect(record.locationStatus == .denied)
         #expect(record.clLocation == nil)
         #expect(record.mapsURL == nil)
     }
@@ -225,13 +166,6 @@ struct PhotoMetadataStampingTests {
 struct PhotoMetadataFormatTests {
     @Test func formatsUTC() {
         #expect(PhotoMetadataFormat.utc(captureDate) == "2026-09-21 14:13:20 UTC")
-    }
-
-    @Test func describesFixOffset() {
-        #expect(PhotoMetadataFormat.fixOffset(fix: captureDate, capture: captureDate) == "Same second as photo")
-        #expect(PhotoMetadataFormat.fixOffset(fix: captureDate.addingTimeInterval(-5), capture: captureDate) == "5 s before photo")
-        #expect(PhotoMetadataFormat.fixOffset(fix: captureDate.addingTimeInterval(3), capture: captureDate) == "3 s after photo")
-        #expect(PhotoMetadataFormat.fixOffset(fix: captureDate.addingTimeInterval(-600), capture: captureDate) == "10 min before photo")
     }
 }
 
@@ -316,7 +250,7 @@ struct PhotoRetentionTests {
     @Test func deleteRemovesFilesFromDisk() async throws {
         let record = try await PhotoSavePipeline().run(
             capture: PhotoCapture(jpegData: makeJPEG(), createdAt: captureDate),
-            locationFix: LocationFix(status: .unavailable, location: nil)
+            location: nil
         )
         let context = try makeContext([record])
         let photoURL = try #require(record.photoURL)
@@ -332,27 +266,98 @@ struct PhotoRetentionTests {
 
 // MARK: - Upgrading existing photos
 
-/// `PhotoRecord` exactly as it was before location was added.
-private enum PreLocationSchema {
-    @Model
-    final class PhotoRecord {
-        @Attribute(.unique) var id: UUID
-        var filePath: String
-        var createdAt: Date
-        var thumbnailPath: String
-        var flags: Int
-
-        init(id: UUID, filePath: String, createdAt: Date, thumbnailPath: String, flags: Int) {
-            self.id = id
-            self.filePath = filePath
-            self.createdAt = createdAt
-            self.thumbnailPath = thumbnailPath
-            self.flags = flags
-        }
+/// Writes a store holding one photo in an earlier layout: either from before location was added,
+/// or with the detailed location fields that have since been removed.
+/// Built with Core Data directly, because a second SwiftData model named `PhotoRecord` in the same process confuses SwiftData.
+private func writeOldStore(at url: URL, id: UUID, withDetailedLocation: Bool) throws {
+    func attribute(_ name: String, _ type: NSAttributeType, optional: Bool = true) -> NSAttributeDescription {
+        let attribute = NSAttributeDescription()
+        attribute.name = name
+        attribute.attributeType = type
+        attribute.isOptional = optional
+        return attribute
     }
+
+    let entity = NSEntityDescription()
+    entity.name = "PhotoRecord"
+    var properties = [
+        attribute("id", .UUIDAttributeType, optional: false),
+        attribute("filePath", .stringAttributeType, optional: false),
+        attribute("createdAt", .dateAttributeType, optional: false),
+        attribute("thumbnailPath", .stringAttributeType, optional: false),
+        attribute("flags", .integer64AttributeType, optional: false)
+    ]
+    let locationProperties = [
+        attribute("latitude", .doubleAttributeType),
+        attribute("longitude", .doubleAttributeType),
+        attribute("horizontalAccuracy", .doubleAttributeType),
+        attribute("altitude", .doubleAttributeType),
+        attribute("verticalAccuracy", .doubleAttributeType),
+        attribute("locationTimestamp", .dateAttributeType),
+        attribute("locationStatusRaw", .stringAttributeType),
+        attribute("captureTimeZoneIdentifier", .stringAttributeType)
+    ]
+    if withDetailedLocation {
+        properties += locationProperties
+    }
+    entity.properties = properties
+    entity.uniquenessConstraints = [["id"]]
+
+    let model = NSManagedObjectModel()
+    model.entities = [entity]
+
+    let coordinator = NSPersistentStoreCoordinator(managedObjectModel: model)
+    let store = try coordinator.addPersistentStore(type: .sqlite, at: url)
+    let context = NSManagedObjectContext(.mainQueue)
+    context.persistentStoreCoordinator = coordinator
+
+    let photo = NSManagedObject(entity: entity, insertInto: context)
+    photo.setValuesForKeys([
+        "id": id,
+        "filePath": "old.jpg",
+        "createdAt": captureDate,
+        "thumbnailPath": "old_thumb.jpg",
+        "flags": withDetailedLocation ? 1 : 0
+    ])
+    if withDetailedLocation {
+        photo.setValuesForKeys([
+            "latitude": 47.5,
+            "longitude": -122.3,
+            "horizontalAccuracy": 8.0,
+            "altitude": 100.0,
+            "verticalAccuracy": 4.0,
+            "locationTimestamp": captureDate,
+            "locationStatusRaw": "live",
+            "captureTimeZoneIdentifier": "America/Los_Angeles"
+        ])
+    }
+    try context.save()
+    try coordinator.remove(store)
 }
 
 struct PhotoRecordMigrationTests {
+    @Test func photosWithDetailedLocationSurviveUpgrade() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let storeURL = directory.appendingPathComponent("migration.store")
+        let id = UUID()
+
+        try writeOldStore(at: storeURL, id: id, withDetailedLocation: true)
+
+        let schema = Schema([PhotoRecord.self])
+        let container = try ModelContainer(for: schema, configurations: ModelConfiguration(schema: schema, url: storeURL))
+        let records = try ModelContext(container).fetch(FetchDescriptor<PhotoRecord>())
+
+        let record = try #require(records.first)
+        #expect(records.count == 1)
+        #expect(record.id == id)
+        #expect(record.latitude == 47.5)
+        #expect(record.longitude == -122.3)
+        #expect(record.captureTimeZoneIdentifier == "America/Los_Angeles")
+        #expect(record.isKept)
+    }
+
     @Test func existingPhotosSurviveUpgrade() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -360,19 +365,7 @@ struct PhotoRecordMigrationTests {
         let storeURL = directory.appendingPathComponent("migration.store")
         let id = UUID()
 
-        do {
-            let schema = Schema([PreLocationSchema.PhotoRecord.self])
-            let container = try ModelContainer(for: schema, configurations: ModelConfiguration(schema: schema, url: storeURL))
-            let context = ModelContext(container)
-            context.insert(PreLocationSchema.PhotoRecord(
-                id: id,
-                filePath: "old.jpg",
-                createdAt: captureDate,
-                thumbnailPath: "old_thumb.jpg",
-                flags: 0
-            ))
-            try context.save()
-        }
+        try writeOldStore(at: storeURL, id: id, withDetailedLocation: false)
 
         let schema = Schema([PhotoRecord.self])
         let container = try ModelContainer(for: schema, configurations: ModelConfiguration(schema: schema, url: storeURL))
@@ -384,7 +377,6 @@ struct PhotoRecordMigrationTests {
         #expect(record.filePath == "old.jpg")
         #expect(record.createdAt == captureDate)
         #expect(record.latitude == nil)
-        #expect(record.locationStatus == nil)
         #expect(!record.isKept)
     }
 }

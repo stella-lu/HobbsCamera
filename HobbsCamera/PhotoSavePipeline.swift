@@ -9,12 +9,12 @@ import Foundation
 /// - Generate and save thumbnail
 /// - Return a `PhotoRecord` ready to be inserted into SwiftData
 struct PhotoSavePipeline {
-    func run(capture: PhotoCapture, locationFix: LocationFix) async throws -> PhotoRecord {
+    func run(capture: PhotoCapture, location: CapturedLocation?) async throws -> PhotoRecord {
         try await Task.detached(priority: .userInitiated) {
             let photoURL = try AppPhotoStore.saveJPEGToPrivateLibrary(
                 capture.jpegData,
                 createdAt: capture.createdAt,
-                location: locationFix.location
+                location: location
             )
             let thumbURL = try AppPhotoStore.generateAndSaveThumbnail(for: photoURL)
 
@@ -24,7 +24,7 @@ struct PhotoSavePipeline {
                 createdAt: capture.createdAt,
                 thumbnailPath: thumbURL.lastPathComponent,
                 flags: 0,
-                locationFix: locationFix,
+                location: location,
                 captureTimeZoneIdentifier: TimeZone.current.identifier
             )
         }.value

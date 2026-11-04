@@ -15,32 +15,30 @@ enum SampleData {
         }
 
         let now = Date()
-        let samples: [(daysAgo: Double, kind: Kind, status: LocationStatus, accuracy: Double, fixAge: Double, kept: Bool)] = [
-            (0.02, .hobbs("1234.5"), .live, 6, 1, false),
-            (0.03, .tach("1187.2"), .live, 8, 2, false),
-            (0.05, .fuel("38.4"), .live, 11, 1, false),
-            (1.1, .hobbs("1231.9"), .lastKnown, 35, 420, false),
-            (1.15, .tach("1184.9"), .unavailable, 0, 0, false),
-            (3.3, .hobbs("1229.0"), .live, 5, 1, true),
-            (3.32, .fuel("41.0"), .denied, 0, 0, false),
-            (40, .hobbs("1210.4"), .live, 9, 1, false),
-            (200, .tach("1100.0"), .live, 7, 1, true),
-            (400, .hobbs("1150.2"), .live, 12, 1, false)
+        let samples: [(daysAgo: Double, kind: Kind, hasLocation: Bool, kept: Bool)] = [
+            (0.02, .hobbs("1234.5"), true, false),
+            (0.03, .tach("1187.2"), true, false),
+            (0.05, .fuel("38.4"), true, false),
+            (1.1, .hobbs("1231.9"), true, false),
+            (1.15, .tach("1184.9"), false, false),
+            (3.3, .hobbs("1229.0"), true, true),
+            (3.32, .fuel("41.0"), false, false),
+            (40, .hobbs("1210.4"), true, false),
+            (200, .tach("1100.0"), true, true),
+            (400, .hobbs("1150.2"), true, false)
         ]
 
         for sample in samples {
             let createdAt = now.addingTimeInterval(-sample.daysAgo * 24 * 60 * 60)
-            var location: CapturedLocation?
-            if sample.status == .live || sample.status == .lastKnown {
-                location = CapturedLocation(CLLocation(
+            let location = sample.hasLocation
+                ? CapturedLocation(CLLocation(
                     coordinate: CLLocationCoordinate2D(latitude: 47.5301, longitude: -122.3019),
                     altitude: 6,
-                    horizontalAccuracy: sample.accuracy,
+                    horizontalAccuracy: 8,
                     verticalAccuracy: 4,
-                    timestamp: createdAt.addingTimeInterval(-sample.fixAge)
+                    timestamp: createdAt
                 ))
-            }
-            let fix = LocationFix(status: sample.status, location: location)
+                : nil
 
             guard let jpeg = sample.kind.render().jpegData(compressionQuality: 0.9),
                   let photoURL = try? AppPhotoStore.saveJPEGToPrivateLibrary(jpeg, createdAt: createdAt, location: location),
@@ -52,7 +50,7 @@ enum SampleData {
                 filePath: photoURL.lastPathComponent,
                 createdAt: createdAt,
                 thumbnailPath: thumbURL.lastPathComponent,
-                locationFix: fix,
+                location: location,
                 captureTimeZoneIdentifier: TimeZone.current.identifier
             )
             record.isKept = sample.kept

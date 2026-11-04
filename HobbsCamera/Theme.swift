@@ -7,28 +7,7 @@ enum Theme {
     static let card = Color(white: 0.10)
     static let cardStroke = Color.white.opacity(0.07)
     static let live = Color(red: 0.30, green: 0.85, blue: 0.47)
-    static let caution = Color(red: 1.0, green: 0.70, blue: 0.22)
     static let danger = Color(red: 1.0, green: 0.36, blue: 0.36)
-}
-
-// MARK: - Location status styling
-
-extension LocationStatus? {
-    /// Icon, color and short label for a photo's location status. `nil` is a photo from before location was recorded.
-    var style: (icon: String, color: Color, label: String) {
-        switch self {
-        case .live:
-            return ("location.fill", Theme.live, "Location recorded")
-        case .lastKnown:
-            return ("location", Theme.caution, "Last known location")
-        case .unavailable:
-            return ("location.slash.fill", Theme.caution, "No GPS fix")
-        case .denied:
-            return ("location.slash.fill", Theme.caution, "Location off")
-        case nil:
-            return ("location.slash", .secondary, "No location recorded")
-        }
-    }
 }
 
 // MARK: - Modifiers
@@ -67,22 +46,6 @@ struct SectionLabel: View {
             .font(.caption2.weight(.semibold))
             .tracking(1.2)
             .foregroundStyle(.secondary)
-    }
-}
-
-/// A colored capsule describing a status.
-struct StatusChip: View {
-    let icon: String
-    let text: String
-    let color: Color
-
-    var body: some View {
-        Label(text, systemImage: icon)
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(color)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background(color.opacity(0.14), in: Capsule())
     }
 }
 

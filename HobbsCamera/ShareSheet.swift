@@ -9,16 +9,11 @@ struct ShareRequest: Identifiable {
 }
 
 /// Shares the original photo files, with their metadata, through the system share sheet.
-///
-/// "Save Image" is removed because it would put the photo in Apple Photos, where Google Photos
-/// could upload it. Saving to Apple Photos stays a separate action that warns about this first.
 struct ShareSheet: UIViewControllerRepresentable {
     let urls: [URL]
 
     func makeUIViewController(context: Context) -> UIActivityViewController {
-        let controller = UIActivityViewController(activityItems: urls, applicationActivities: nil)
-        controller.excludedActivityTypes = [.saveToCameraRoll]
-        return controller
+        UIActivityViewController(activityItems: urls, applicationActivities: nil)
     }
 
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {
